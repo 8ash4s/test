@@ -76,6 +76,3 @@ python greeks_visualization.py
 - Data Analysis: pandas, NumPy, regression, hypothesis testing
 - Visualization: Matplotlib, Excel dashboards, Power BI
 
-## License
-
-MIT License - feel free to use for educational purposes.

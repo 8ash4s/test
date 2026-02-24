@@ -1,0 +1,4 @@
+Option Type,Price,Std Error,r (FRED),sigma (adj),Regime
+Black-Scholes,12.579880706869687,0.0,0.03571,0.17,expansion
+Asian Call,5.634926599582718,0.03436052692585751,0.03571,0.17,expansion
+Barrier (Up-and-Out),0.07859041872292849,0.00211700282556185,0.03571,0.17,expansion
