@@ -1,4 +1,4 @@
-# Quantitative Finance Portfolio
+#  Finance Portfolio
 
 **Author:** Matthew Bowers  
 **Contact:** [matthewtb26@gmail.com](mailto:matthewtb26@gmail.com) | [LinkedIn](https://linkedin.com/in/matthewbowers) | [GitHub](https://github.com/8ash4s)
