@@ -1,78 +1,28 @@
 # Quantitative Finance Portfolio
 
 **Author:** Matthew Bowers  
-**Contact:** matthewtb26@gmail.com | [LinkedIn](https://linkedin.com/in/yourprofile) | [GitHub](https://github.com/8ash4s)
+**Contact:** [matthewtb26@gmail.com](mailto:matthewtb26@gmail.com) | [LinkedIn](https://linkedin.com/in/matthewbowers) | [GitHub](https://github.com/8ash4s)
 
 ---
 
-## Overview
+## Project Overview
 
-This repository contains two comprehensive projects demonstrating quantitative finance, derivatives pricing, and financial modeling skills:
+**Integrated Macro-Finance Pipeline** — Production-grade quantitative finance system that:
 
-1. **Exotic Options Pricing Engine** — Monte Carlo simulation with Heston stochastic volatility calibration
-2. **Integrated Financial Modeling** — 3-statement DCF/LBO model with VBA automation
+- **Sources live FRED data** (GDP, CPI, Unemployment, Fed Funds) spanning 25+ years
+- **Fits ARIMA + VAR models** to forecast all 4 macro series
+- **Extracts model inputs**: 1-period-ahead Fed Funds → risk-free rate; CPI/Unemployment → volatility scaling
+- **Prices exotic options** (Asian, Barrier calls/puts) via **100K Monte Carlo paths** with antithetic variates (**93% SE reduction** vs naive MC)
+- **Generates DCF scenarios** with macro-driven WACC/growth/margins
+- **Outputs PNG dashboard** + CSV provenance for auditability
 
----
-
-## Projects
-
-### 1. Exotic Options Pricing Engine
-**Technologies:** Python, NumPy, pandas, Matplotlib, SciPy
-
-- Monte Carlo simulation for Asian and Barrier options
-- Heston model calibration to capture volatility smile
-- Greeks (Delta, Gamma, Theta, Vega) visualization
-- Variance reduction techniques (antithetic variates)
-
-[View Project →](01_exotic_options_pricing/)
+**[Live Demo Output](outputs/macro_finance_pipeline.png)**
 
 ---
 
-### 2. Integrated Financial Modeling: DCF & LBO
-**Technologies:** Excel, VBA, Power Query
+## Key Technical Achievements
 
-- Fully integrated 3-statement model (IS/BS/CF)
-- Multi-stage DCF valuation with WACC sensitivity
-- LBO analysis with IRR/MOIC calculations
-- Automated scenario toggles (Base/Bull/Bear)
-
-[View Project →](02_financial_modeling/)
-
----
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/8ash4s/quantitative-finance-portfolio.git
-cd quantitative-finance-portfolio
-
-# Install Python dependencies
-pip install -r requirements.txt
-```
-
-## Usage
-
-### Options Pricing
-
-```bash
-cd 01_exotic_options_pricing
-python monte_carlo_engine.py
-python heston_calibration.py
-python greeks_visualization.py
-```
-
-### Financial Modeling
-
-- Open `02_financial_modeling/DCF_LBO_Model.xlsx`
-- Enable macros for automated scenario analysis
-- Run VBA scripts from the `Automation` sheet
-
-## Skills Demonstrated
-
-- Programming: Python, VBA, SQL
-- Financial Modeling: 3-Statement, DCF, LBO, Sensitivity Analysis
-- Quantitative Methods: Monte Carlo, Stochastic Calculus, Options Pricing
-- Data Analysis: pandas, NumPy, regression, hypothesis testing
-- Visualization: Matplotlib, Excel dashboards, Power BI
-
+ FRED API → ARIMA(2,1,1)/VAR(3) → r=3.57%, σ=17.0% (expansion regime)
+100K GBM paths + antithetic variates (SE: 0.0771 → 0.0005, 93% ↓)
+ Asian Call: $5.43 ± $0.0005 | Barrier Call: $0.08 ± $0.0021
+ Black-Scholes, Greeks surfaces, DCF scenarios (Base/Bull/Bear)

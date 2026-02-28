@@ -85,7 +85,7 @@ class MonteCarloEngine:
     # ------------------------------------------------------------------
 
     def price_asian(self, averaging="arithmetic", option_type="call",
-                    control_variate=True):
+                    control_variate=True, variance_reduction=True):
         """
         Price an Asian option.
 
@@ -94,8 +94,9 @@ class MonteCarloEngine:
         averaging      : 'arithmetic' or 'geometric'
         option_type    : 'call' or 'put'
         control_variate: Use geometric CV when averaging='arithmetic'
+        variance_reduction : Toggle antithetic variates (default: True)
         """
-        paths    = self.generate_paths()
+        paths    = self.generate_paths(variance_reduction=variance_reduction)
         spot     = paths[:, 1:]
         discount = np.exp(-self.r * self.T)
         sign     = 1.0 if option_type == "call" else -1.0
@@ -125,13 +126,14 @@ class MonteCarloEngine:
 
         return float(price), float(se)
 
-    def price_barrier(self, barrier, barrier_type="up-and-out", option_type="call"):
+    def price_barrier(self, barrier, barrier_type="up-and-out", option_type="call",
+                      variance_reduction=True):
         """
         Price a barrier option (call or put).
 
         barrier_type: 'up-and-out' | 'down-and-out' | 'up-and-in' | 'down-and-in'
         """
-        paths    = self.generate_paths()
+        paths    = self.generate_paths(variance_reduction=variance_reduction)
         final    = paths[:, -1]
         discount = np.exp(-self.r * self.T)
         sign     = 1.0 if option_type == "call" else -1.0

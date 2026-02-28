@@ -6,8 +6,7 @@ Setup:
     1. Get a free FRED API key at https://fred.stlouisfed.org/docs/api/api_key.html
     2. Set it as an environment variable:
            export FRED_API_KEY="your_key_here"
-    3. Install dependencies:
-           pip install -r requirements.txt
+       OR the key below will be used as fallback.
 
 Usage:
     python macro_forecasting.py                  # ARIMA forecasts
@@ -33,21 +32,23 @@ from statsmodels.tsa.stattools import adfuller
 warnings.filterwarnings("ignore")
 
 # ---------------------------------------------------------------------------
-# FRED series to pull
-#   Key   : label used in code / plots
-#   Value : FRED series ID
+# FRED API key — env var takes priority, hardcoded key is fallback
+# ---------------------------------------------------------------------------
+_FALLBACK_FRED_KEY = "12174540861647b9e4dde323304478d6"
+
+# ---------------------------------------------------------------------------
+# FRED series
 # ---------------------------------------------------------------------------
 MONTHLY_SERIES = {
-    "CPI":          "CPIAUCSL",   # CPI All Urban Consumers (index)
-    "Unemployment": "UNRATE",     # Unemployment Rate (%)
-    "Fed Funds":    "FEDFUNDS",   # Effective Federal Funds Rate (%)
+    "CPI":          "CPIAUCSL",
+    "Unemployment": "UNRATE",
+    "Fed Funds":    "FEDFUNDS",
 }
 
 QUARTERLY_SERIES = {
-    "GDP":          "GDPC1",      # Real GDP (billions of chained 2017 dollars)
+    "GDP": "GDPC1",
 }
 
-# Default ARIMA orders — (p, d, q)
 ARIMA_ORDERS = {
     "CPI":          (2, 1, 1),
     "Unemployment": (2, 1, 1),
@@ -61,12 +62,12 @@ ARIMA_ORDERS = {
 # ---------------------------------------------------------------------------
 
 def get_fred_client():
-    key = os.environ.get("FRED_API_KEY")
+    key = os.environ.get("FRED_API_KEY") or _FALLBACK_FRED_KEY
     if not key:
         raise EnvironmentError(
-            "FRED_API_KEY environment variable not set.\n"
-            "Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html\n"
-            "Then run:  export FRED_API_KEY='your_key_here'"
+            "No FRED API key found. Set FRED_API_KEY env var or add your key to "
+            "_FALLBACK_FRED_KEY in the script.\n"
+            "Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html"
         )
     return Fred(api_key=key)
 
@@ -93,22 +94,28 @@ def fetch_data(fred, start="2000-01-01"):
 
 
 # ---------------------------------------------------------------------------
-# Stationarity helper
+# Stationarity
 # ---------------------------------------------------------------------------
 
 def is_stationary(series, sig=0.05):
-    """Return True if ADF test rejects unit root at given significance level."""
-    result = adfuller(series.dropna(), autolag="AIC")
+    """ADF test — returns True if unit root is rejected."""
+    result = adfuller(np.asarray(series.dropna()), autolag="AIC")
     return result[1] < sig
 
 
-def make_stationary(series):
+def make_stationary(series, max_diffs=2):
     """
-    Difference the series until stationary (max 2 differences).
+    Difference the series conservatively.
+    CPI (CPIAUCSL) is known I(1), so force exactly one diff. All other
+    series are differenced adaptively up to `max_diffs`.
     Returns (stationary_series, n_diffs).
     """
+    if series.name == "CPI":
+        # CPI is textbook I(1) — avoid over-differencing.
+        return series.diff().dropna(), 1
+
     s, d = series.copy(), 0
-    while not is_stationary(s) and d < 2:
+    while not is_stationary(s) and d < max_diffs:
         s = s.diff().dropna()
         d += 1
     return s, d
@@ -118,25 +125,29 @@ def make_stationary(series):
 # ARIMA
 # ---------------------------------------------------------------------------
 
-def run_arima(series, name, order, periods=12):
+def _future_period_index(last_period, periods):
     """
-    Fit ARIMA model and return a forecast DataFrame with confidence intervals.
+    Build a future PeriodIndex that works for both monthly ('M') and
+    quarterly ('Q') series — avoids relying on PeriodIndex.freq.freqstr.
     """
-    model = ARIMA(series, order=order)
-    fit = model.fit()
-    forecast = fit.get_forecast(steps=periods)
-    mean = forecast.predicted_mean
-    ci = forecast.conf_int(alpha=0.05)
+    freq = last_period.freqstr[0]   # 'M' or 'Q'
+    return pd.period_range(start=last_period + 1, periods=periods, freq=freq)
 
-    # Build a clean period index for the forecast
-    last = series.index[-1]
-    freq = series.index.freq
-    future_idx = pd.period_range(start=last + 1, periods=periods, freq=freq)
+
+def run_arima(series, name, order, periods=12):
+    """Fit ARIMA and return (fit, forecast_df) with 95 % CI."""
+    model = ARIMA(series, order=order)
+    fit   = model.fit()
+    fc    = fit.get_forecast(steps=periods)
+    mean  = fc.predicted_mean
+    ci    = fc.conf_int(alpha=0.05)
+
+    future_idx = _future_period_index(series.index[-1], periods)
 
     result = pd.DataFrame({
-        "forecast": mean.values,
-        "lower_95": ci.iloc[:, 0].values,
-        "upper_95": ci.iloc[:, 1].values,
+        "forecast":  mean.values,
+        "lower_95":  ci.iloc[:, 0].values,
+        "upper_95":  ci.iloc[:, 1].values,
     }, index=future_idx)
 
     print(f"  {name:15s} ARIMA{order}  AIC={fit.aic:.1f}  "
@@ -144,32 +155,53 @@ def run_arima(series, name, order, periods=12):
     return fit, result
 
 
-def plot_arima_forecasts(history_dict, forecast_dict, periods, output_dir):
-    """Plot each series with its ARIMA forecast on a 2×2 grid."""
-    names = list(history_dict.keys())
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    fig.suptitle(f"ARIMA Forecasts — {periods}-Period Horizon", fontsize=14, fontweight="bold")
-
-    for ax, name in zip(axes.flat, names):
+def _plot_single_arima_grid(history_dict, forecast_dict, periods, title, axes):
+    """Shared plotting logic for any dict of series + forecasts."""
+    for ax, name in zip(axes, history_dict.keys()):
         hist = history_dict[name]
-        fc = forecast_dict[name]
-
+        fc   = forecast_dict[name]
         hist_dt = hist.index.to_timestamp()
-        fc_dt = fc.index.to_timestamp()
+        fc_dt   = fc.index.to_timestamp()
 
-        ax.plot(hist_dt, hist.values, color="steelblue", linewidth=1.2, label="Historical")
-        ax.plot(fc_dt, fc["forecast"], color="tomato", linewidth=1.5, linestyle="--", label="Forecast")
+        ax.plot(hist_dt, hist.values, color="steelblue", lw=1.2, label="Historical")
+        ax.plot(fc_dt, fc["forecast"], color="tomato", lw=1.5,
+                linestyle="--", label="Forecast")
         ax.fill_between(fc_dt, fc["lower_95"], fc["upper_95"],
                         color="tomato", alpha=0.15, label="95% CI")
-        ax.axvline(hist_dt[-1], color="gray", linestyle=":", linewidth=0.8)
+        ax.axvline(hist_dt[-1], color="gray", linestyle=":", lw=0.8)
         ax.set_title(name, fontweight="bold")
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
         ax.xaxis.set_major_locator(mdates.YearLocator(5))
         ax.tick_params(axis="x", rotation=30)
         ax.legend(fontsize=8)
 
+
+def plot_arima_forecasts(monthly_hist, monthly_fc, quarterly_hist, quarterly_fc,
+                         periods, output_dir):
+    """2×2 grid for monthly + 1 panel for quarterly."""
+    # --- Monthly 2×2 ---
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig.suptitle(f"ARIMA Forecasts — {periods}-Period Horizon (Monthly)",
+                 fontsize=14, fontweight="bold")
+    _plot_single_arima_grid(monthly_hist, monthly_fc, periods, "", axes.flat)
+    # hide unused 4th panel if only 3 monthly series
+    for ax in list(axes.flat)[len(monthly_hist):]:
+        ax.set_visible(False)
     plt.tight_layout()
-    out = output_dir / "arima_forecasts.png"
+    out = output_dir / "arima_forecasts_monthly.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved → {out}")
+
+    # --- Quarterly (GDP) ---
+    fig, axes = plt.subplots(1, len(quarterly_hist), figsize=(7, 4))
+    if len(quarterly_hist) == 1:
+        axes = [axes]
+    fig.suptitle(f"ARIMA Forecasts — {periods}-Period Horizon (Quarterly)",
+                 fontsize=13, fontweight="bold")
+    _plot_single_arima_grid(quarterly_hist, quarterly_fc, periods, "", axes)
+    plt.tight_layout()
+    out = output_dir / "arima_forecasts_quarterly.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {out}")
@@ -181,63 +213,59 @@ def plot_arima_forecasts(history_dict, forecast_dict, periods, output_dir):
 
 def run_var(monthly_df, periods=12):
     """
-    Fit a VAR model on the monthly series (CPI, Unemployment, Fed Funds).
-    Differences non-stationary series, fits VAR, then undoes differencing
-    to return level forecasts.
+    VAR on monthly series. Differences non-stationary columns, fits VAR,
+    then reconstructs level forecasts via cumulative sum.
     """
     print("\nFitting VAR model...")
 
-    # Difference as needed and track how many diffs per column
-    stationary_parts = {}
-    n_diffs = {}
+    stationary_parts, n_diffs = {}, {}
     for col in monthly_df.columns:
         s, d = make_stationary(monthly_df[col])
         stationary_parts[col] = s
         n_diffs[col] = d
-        print(f"  {col:15s} differenced {d}×  (now stationary)")
+        print(f"  {col:15s} differenced {d}×")
 
-    # Align on common index after differencing
     stat_df = pd.DataFrame(stationary_parts).dropna()
 
-    # Select lag order (up to 12, BIC criterion)
     var_model = VAR(stat_df)
-    lag_order = var_model.select_order(maxlags=12)
-    best_lag = lag_order.selected_orders.get("bic", 2)
+    lag_res   = var_model.select_order(maxlags=12)
+    # Fix: use .bic attribute directly, not .selected_orders dict
+    best_lag  = int(lag_res.bic) if lag_res.bic >= 1 else 2
     print(f"  VAR lag order (BIC): {best_lag}")
 
-    fit = var_model.fit(best_lag)
-    raw_fc = fit.forecast(stat_df.values[-best_lag:], steps=periods)
-    fc_df = pd.DataFrame(raw_fc, columns=monthly_df.columns)
+    fit     = var_model.fit(best_lag)
+    raw_fc  = fit.forecast(stat_df.values[-best_lag:], steps=periods)
+    fc_df   = pd.DataFrame(raw_fc, columns=monthly_df.columns)
 
-    # Undo differencing to recover level forecasts
+    # Reconstruct levels
     level_fc = {}
     for col in monthly_df.columns:
         last_vals = monthly_df[col].dropna()
-        fc_vals = fc_df[col].values
+        fc_vals   = fc_df[col].values
         for _ in range(n_diffs[col]):
             fc_vals = np.cumsum(np.insert(fc_vals, 0, last_vals.iloc[-1]))[1:]
         level_fc[col] = fc_vals
 
-    last = monthly_df.index[-1]
-    future_idx = pd.period_range(start=last + 1, periods=periods, freq="M")
-    result = pd.DataFrame(level_fc, index=future_idx)
-    return fit, result
+    future_idx = pd.period_range(start=monthly_df.index[-1] + 1,
+                                 periods=periods, freq="M")
+    return fit, pd.DataFrame(level_fc, index=future_idx)
 
 
 def plot_var_forecast(monthly_df, var_fc, output_dir):
-    """Plot VAR level forecasts against history for each monthly series."""
+    """VAR level forecasts vs. last 5 years of history."""
     cols = monthly_df.columns.tolist()
     fig, axes = plt.subplots(1, len(cols), figsize=(14, 4))
-    fig.suptitle("VAR Model Forecasts (Monthly Series)", fontsize=13, fontweight="bold")
+    fig.suptitle("VAR Model Forecasts (Monthly Series)",
+                 fontsize=13, fontweight="bold")
 
     for ax, col in zip(axes, cols):
         hist_dt = monthly_df.index.to_timestamp()
-        fc_dt = var_fc.index.to_timestamp()
+        fc_dt   = var_fc.index.to_timestamp()
         ax.plot(hist_dt[-60:], monthly_df[col].values[-60:],
-                color="steelblue", linewidth=1.2, label="Historical (5 yr)")
-        ax.plot(fc_dt, var_fc[col].values,
-                color="darkorange", linewidth=1.5, linestyle="--", label="VAR Forecast")
-        ax.axvline(hist_dt[-1], color="gray", linestyle=":", linewidth=0.8)
+                color="steelblue", lw=1.2, label="Historical (5 yr)")
+        ax.plot(fc_dt, var_fc[col].values, color="darkorange",
+                lw=1.5, linestyle="--", label="VAR Forecast")
+        ax.axvline(hist_dt[-1], color="gray", linestyle=":", lw=0.8)
         ax.set_title(col, fontweight="bold")
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
         ax.tick_params(axis="x", rotation=30)
@@ -256,52 +284,72 @@ def plot_var_forecast(monthly_df, var_fc, output_dir):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Macro forecasting with FRED data.")
-    p.add_argument("--model", choices=["arima", "var", "both"], default="arima",
-                   help="Which model(s) to run (default: arima)")
+    p.add_argument("--model",   choices=["arima", "var", "both"], default="arima")
     p.add_argument("--periods", type=int, default=12,
                    help="Forecast horizon in periods (default: 12)")
-    p.add_argument("--start", default="2000-01-01",
+    p.add_argument("--start",   default="2000-01-01",
                    help="Data start date (default: 2000-01-01)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # Init client first — fail fast before creating directories
+    fred = get_fred_client()
+
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
 
-    fred = get_fred_client()
     monthly_df, quarterly_df = fetch_data(fred, start=args.start)
 
     # --- ARIMA ---
     if args.model in ("arima", "both"):
         print(f"\nFitting ARIMA models ({args.periods}-period horizon)...")
-        all_series = {**{c: monthly_df[c] for c in monthly_df.columns},
-                      **{c: quarterly_df[c] for c in quarterly_df.columns}}
 
-        arima_forecasts = {}
-        for name, series in all_series.items():
+        monthly_hist = {c: monthly_df[c] for c in monthly_df.columns}
+        quarterly_hist = {c: quarterly_df[c] for c in quarterly_df.columns}
+
+        monthly_fc   = {}
+        quarterly_fc = {}
+
+        for name, series in monthly_hist.items():
             _, fc = run_arima(series, name, ARIMA_ORDERS[name], periods=args.periods)
-            arima_forecasts[name] = fc
+            monthly_fc[name] = fc
 
-        # Save ARIMA forecasts to CSV
+        for name, series in quarterly_hist.items():
+            _, fc = run_arima(series, name, ARIMA_ORDERS[name], periods=args.periods)
+            quarterly_fc[name] = fc
+
+        # Save CSV
         rows = []
-        for name, fc in arima_forecasts.items():
-            for period, row in fc.iterrows():
-                rows.append({"series": name, "period": str(period),
-                              "forecast": round(row["forecast"], 4),
-                              "lower_95": round(row["lower_95"], 4),
-                              "upper_95": round(row["upper_95"], 4)})
-        pd.DataFrame(rows).to_csv(output_dir / "arima_forecasts.csv", index=False)
+        for fc_dict in (monthly_fc, quarterly_fc):
+            for name, fc in fc_dict.items():
+                for period, row in fc.iterrows():
+                    rows.append({
+                        "series":    name,
+                        "period":    str(period),
+                        "forecast":  round(row["forecast"], 4),
+                        "lower_95":  round(row["lower_95"], 4),
+                        "upper_95":  round(row["upper_95"], 4),
+                    })
+        csv_out = output_dir / "arima_forecasts.csv"
+        pd.DataFrame(rows).to_csv(csv_out, index=False)
+        print(f"  Saved → {csv_out}")
 
-        plot_arima_forecasts(all_series, arima_forecasts, args.periods, output_dir)
+        plot_arima_forecasts(monthly_hist, monthly_fc,
+                             quarterly_hist, quarterly_fc,
+                             args.periods, output_dir)
 
     # --- VAR ---
     if args.model in ("var", "both"):
         _, var_fc = run_var(monthly_df, periods=args.periods)
         plot_var_forecast(monthly_df, var_fc, output_dir)
-        var_fc.index = var_fc.index.astype(str)
-        var_fc.to_csv(output_dir / "var_forecast.csv")
-        print(f"  Saved → {output_dir / 'var_forecast.csv'}")
+
+        var_out = output_dir / "var_forecast.csv"
+        var_fc_export = var_fc.copy()
+        var_fc_export.index = var_fc_export.index.strftime("%Y-%m")  # Fix: proper period formatting
+        var_fc_export.to_csv(var_out)
+        print(f"  Saved → {var_out}")
 
     print("\nDone.")

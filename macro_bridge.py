@@ -7,7 +7,7 @@ Extracts structured MacroInputs from FRED ARIMA forecasts and feeds them into:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 import pandas as pd
@@ -17,28 +17,30 @@ import pandas as pd
 # Regime classification
 # ---------------------------------------------------------------------------
 # Thresholds calibrated to post-2000 U.S. macro history.
-# Each regime maps to a volatility multiplier applied to base sigma.
+# Rows evaluated in order; first match wins.
+# Urate bounds are now mutually exclusive to eliminate overlap gaps.
 
-# Rows are evaluated in order; the first match wins.
-# Covers all CPI / unemployment combinations without gaps.
 _REGIME_TABLE = [
-    # (cpi_thresh, cpi_op, urate_thresh, urate_op, label,           sigma_mult)
-    (3.0, "<",  5.0, "<",  "expansion",   0.85),   # low inflation, low unemployment
-    (4.0, ">=", 5.0, "<",  "overheating", 1.15),   # high inflation, low unemployment
-    (4.0, ">=", 5.5, ">=", "stagflation", 1.35),   # high inflation, high unemployment
-    (3.0, "<",  5.5, ">=", "contraction", 1.25),   # low inflation, high unemployment
-    # Mid-range CPI [3 %, 4 %) — these were previously unmatched "neutral" gaps
-    (4.0, "<",  5.0, "<",  "mild_growth",  0.90),  # CPI 3-4 %, urate < 5 %
-    (4.0, "<",  5.5, "<",  "mild_growth",  0.95),  # CPI 3-4 %, urate 5-5.5 %
-    (4.0, "<",  5.5, ">=", "slowdown",     1.20),  # CPI 3-4 %, urate >= 5.5 %
+    # (cpi_thresh, cpi_op, urate_low, urate_high, label,          sigma_mult)
+    # CPI < 3 %
+    (3.0, "<",  0.0,  5.0,  "expansion",   0.85),   # low inflation, low urate
+    (3.0, "<",  5.0,  5.5,  "mild_slow",   0.95),   # low inflation, mid urate
+    (3.0, "<",  5.5, 99.0,  "contraction", 1.25),   # low inflation, high urate
+    # CPI [3 %, 4 %)
+    (4.0, "<",  0.0,  5.0,  "mild_growth", 0.90),   # mid inflation, low urate
+    (4.0, "<",  5.0,  5.5,  "mild_growth", 0.95),   # mid inflation, mid urate
+    (4.0, "<",  5.5, 99.0,  "slowdown",    1.20),   # mid inflation, high urate
+    # CPI >= 4 %
+    (4.0, ">=", 0.0,  5.5,  "overheating", 1.15),   # high inflation, low urate
+    (4.0, ">=", 5.5, 99.0,  "stagflation", 1.35),   # high inflation, high urate
 ]
 
 
 def classify_regime(cpi_yoy: float, unemployment: float) -> tuple[str, float]:
     """Return (regime_label, sigma_multiplier) for given macro readings."""
-    for cpi_thresh, cpi_op, u_thresh, u_op, label, mult in _REGIME_TABLE:
+    for cpi_thresh, cpi_op, u_low, u_high, label, mult in _REGIME_TABLE:
         cpi_ok = (cpi_yoy < cpi_thresh) if cpi_op == "<" else (cpi_yoy >= cpi_thresh)
-        u_ok   = (unemployment < u_thresh) if u_op == "<" else (unemployment >= u_thresh)
+        u_ok   = u_low <= unemployment < u_high
         if cpi_ok and u_ok:
             return label, mult
     return "neutral", 1.0
@@ -57,8 +59,7 @@ class MacroInputs:
     -------------
     forward_rate     : ARIMA[+1] Fed Funds forecast (decimal, e.g. 0.043)
     sigma_multiplier : vol scaling factor from macro regime
-    regime           : regime label (expansion / overheating / stagflation /
-                       contraction / neutral)
+    regime           : regime label
 
     DCF / scenario layer
     --------------------
@@ -73,10 +74,16 @@ class MacroInputs:
     cpi_yoy:          float
     unemployment:     float
 
-    # DCF inputs
-    base_wacc:    float;  bull_wacc:    float;  bear_wacc:    float
-    base_growth:  float;  bull_growth:  float;  bear_growth:  float
-    base_margin:  float;  bull_margin:  float;  bear_margin:  float
+    # DCF inputs — each field on its own line (semicolons break @dataclass)
+    base_wacc:    float
+    bull_wacc:    float
+    bear_wacc:    float
+    base_growth:  float
+    bull_growth:  float
+    bear_growth:  float
+    base_margin:  float
+    bull_margin:  float
+    bear_margin:  float
 
     def summary(self) -> str:
         return "\n".join([
@@ -89,6 +96,8 @@ class MacroInputs:
             f"{self.base_wacc:.2%} / {self.bull_wacc:.2%} / {self.bear_wacc:.2%}",
             f"  Growth B/Bu/Be   : "
             f"{self.base_growth:.2%} / {self.bull_growth:.2%} / {self.bear_growth:.2%}",
+            f"  Margin B/Bu/Be   : "                                  # Fix: was missing
+            f"{self.base_margin:.2%} / {self.bull_margin:.2%} / {self.bear_margin:.2%}",
         ])
 
     def to_csv(self, path: str | Path = "outputs/macro_inputs.csv") -> Path:
@@ -121,14 +130,14 @@ def extract_macro_inputs(
     credit_spread   : Spread over risk-free rate for WACC (default: 200 bps).
     """
 
-    # 1. Forward risk-free rate  (FRED reports Fed Funds in %, convert to decimal)
+    # 1. Forward risk-free rate (FRED reports Fed Funds in %, convert to decimal)
     ff_fc        = arima_forecasts["Fed Funds"]
     forward_rate = float(ff_fc["forecast"].iloc[0]) / 100.0
-    forward_rate = max(forward_rate, 0.001)          # floor at 10 bps
+    forward_rate = max(forward_rate, 0.001)   # floor at 0.1% (10 bps)
     ff_lower     = float(ff_fc["lower_95"].iloc[0]) / 100.0
     ff_upper     = float(ff_fc["upper_95"].iloc[0]) / 100.0
 
-    # 2. Macro regime  →  vol multiplier
+    # 2. Macro regime → vol multiplier
     cpi_series   = monthly_df["CPI"]
     cpi_yoy      = float((cpi_series.iloc[-1] / cpi_series.iloc[-13] - 1) * 100)
     unemployment = float(monthly_df["Unemployment"].iloc[-1])
@@ -142,13 +151,16 @@ def extract_macro_inputs(
     bull_wacc = max(ff_lower, 0.001) + credit_spread * 0.9
     bear_wacc = ff_upper + credit_spread * 1.1
 
-    # 4. Revenue growth scenarios (annualized 1-quarter-ahead GDP change)
+    # 4. Revenue growth scenarios (annualised 1-quarter-ahead GDP change)
     gdp_fc      = arima_forecasts["GDP"]
     gdp_last    = float(quarterly_df["GDP"].iloc[-1])
     gdp_next    = float(gdp_fc["forecast"].iloc[0])
-    base_growth = float(max((gdp_next / gdp_last - 1) * 4, -0.10))
+    gdp_qoq     = gdp_next / gdp_last - 1          # raw quarterly change
+    base_growth = float(max(gdp_qoq * 4, -0.10))   # annualise, floor at -10 %
+
+    # Fix: apply floors/ceilings independently so bear can reach its own limit
     bull_growth = float(min(base_growth + 0.04,  0.15))
-    bear_growth = float(max(base_growth - 0.04, -0.15))  # floor at -15 %, below base floor
+    bear_growth = float(max(gdp_qoq * 4 - 0.04, -0.15))  # from raw, not floored base
 
     # 5. EBITDA margin scenarios (CPI-driven cost pressure)
     if cpi_yoy > 5.0:
